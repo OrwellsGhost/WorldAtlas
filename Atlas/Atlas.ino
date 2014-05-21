@@ -2,8 +2,6 @@
 // Course:  CMSC838F Spring 2014 @ UMD
 // Project: MPA04
 
-// THIS PROJECT IS STILL IN WORKING PROGRESS
-
 #include <SPI.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -14,10 +12,12 @@ namespace Comm {
   static const unsigned int localPort = 2390;
   static unsigned int remotePort = NULL;
   static IPAddress remoteIP;
+  static IPAddress broadcastIP;
   static const byte BUFFER_SIZE = 32;
   static char buffer[BUFFER_SIZE];
   
   boolean connect(char* ssid, char* pass);
+  void broadcast(char* s);
   void send(char* s);
   char* receive();
 }
@@ -40,12 +40,26 @@ boolean Comm::connect(char* ssid, char* pass) {
   
   delay(1000);
   
+  IPAddress local = WiFi.localIP();
+  IPAddress subnet = WiFi.subnetMask();
+  
+  broadcastIP[0] = local[0] | (~subnet[0]);
+  broadcastIP[1] = local[1] | (~subnet[1]);
+  broadcastIP[2] = local[2] | (~subnet[2]);
+  broadcastIP[3] = local[3] | (~subnet[3]);
+  
   Serial.print("Connected as ");
-  Serial.println( WiFi.localIP() );
+  Serial.println(local);
   
   Udp.begin(localPort);
   
   return true;
+}
+
+void Comm::broadcast(char* s) {
+  Udp.beginPacket(broadcastIP, 2391);
+  Udp.write(s);
+  Udp.endPacket();
 }
 
 void Comm::send(char* s) {
@@ -56,11 +70,11 @@ void Comm::send(char* s) {
   Udp.write(s);
   Udp.endPacket();
   
-  Serial.print("Sent: ");
+  Serial.print(">> [Sent: ");
   Serial.print(remoteIP);
   Serial.print(":");
   Serial.print(remotePort);
-  Serial.print(" ");
+  Serial.print("] ");
   Serial.println(s);
 }
 
@@ -85,11 +99,11 @@ char* Comm::receive() {
   
   buffer[len] = 0;
   
-  Serial.print("Rcvd: ");
+  Serial.print("<< [Rcvd: ");
   Serial.print(remoteIP);
   Serial.print(":");
   Serial.print(localPort);
-  Serial.print(" ");
+  Serial.print("] ");
   Serial.println(buffer);
   
   return buffer;
@@ -132,7 +146,7 @@ namespace Atlas {
   //  50ms -> 1200 rpm, 20.0 fps
   //  40ms -> 2000 rpm, 25.0 fps
   //  20ms -> 3000 rpm, 50.0 fps
-  const unsigned long baseFrameTimePeriod = 20;
+  const unsigned long baseFrameTimePeriod = 50;
   unsigned long lastFrameTimeStamp = millis();
   
   // Row to led output pin mapping
@@ -140,13 +154,29 @@ namespace Atlas {
   
   int loc = 0; // the current column index
   int adj = 0; // spin right (+) or spin left (-)
+
+  boolean hasPeer = false;
+  
+  int reedIndex = 0;
+  int reedState = 1;
+  unsigned long reeds[] = {0,0,0,0,0,0,0,0};
+  float rpm = 0.0;
   
   void mapPinsToMega2560();
+  void initReedSwitch();
+  
+  boolean establishPeer();
+  boolean updateReeds();
+  
   void lightColumn();
   void lightColumnAndPrint();
+  void setColumn(boolean b);
+  
   int  sign(int x);
   void advance();
   void sleep();
+  
+  
   void operate();
 }
 
@@ -155,6 +185,50 @@ void Atlas::mapPinsToMega2560() {
     ledPins[i] = 18 + i;
     pinMode(ledPins[i], OUTPUT);     
   }
+}
+
+void Atlas::initReedSwitch() {
+  pinMode(17,INPUT);
+  digitalWrite(17,1);
+  
+}
+
+boolean Atlas::establishPeer() {
+  char* s = Comm::receive();
+
+  if (String(s) != "Echo") {
+    //Comm::broadcast("Gamma");
+    return false;
+  }
+  
+  Comm::send("Tango");
+  return true;
+}
+
+boolean Atlas::updateReeds() {
+  int i, a, b, r = digitalRead(17);
+  unsigned long s;
+  
+  if (r ^ reedState == 0)
+    return false;
+    
+  reedState = r;
+  
+  if (r == 1)
+    return false;
+    
+  reeds[reedIndex] = millis();
+  reedIndex = (reedIndex + 1) & 7;
+  
+  for (i = 0, s = 0, a = reedIndex; i < 6; i++) {
+    b = (a + 1) & 7;
+    s += reeds[b] - reeds[a];
+    a = b;
+  }
+ 
+  rpm = (s > 0) ? (180000.0 / float(s)) : 0.0;
+  
+  return true;
 }
 
 void Atlas::lightColumn() {
@@ -181,6 +255,14 @@ void Atlas::lightColumnAndPrint() {
   Serial.println(s);
 }
 
+void Atlas::setColumn(boolean b) {
+  int i;
+  
+  for (i = 0; i < globeHeight; i++) {
+    digitalWrite(ledPins[i], b ? HIGH : LOW);
+  }
+}
+
 int Atlas::sign(int x) {
   return ((x & 0x8000) ? -1 : 1);
 }
@@ -202,11 +284,19 @@ void Atlas::sleep() {
 }
 
 void Atlas::operate() {
-  char* s = Comm::receive();
+  boolean updated = Atlas::updateReeds();
   
-  if (String(s) == "Echo")
-    Comm::send("Tango");
+  if (hasPeer == false)
+    hasPeer = Atlas::establishPeer();
     
+  if (hasPeer && updated) {
+    char c[32];
+    dtostrf(rpm, 3, 4, c);
+    Comm::send(c);
+  }
+  
+  //Atlas::setColumn(reedState == 0);
+  
   lightColumn();
   advance();
   sleep();
@@ -215,14 +305,12 @@ void Atlas::operate() {
 void setup() {
   Serial.begin(57600);
   Atlas::mapPinsToMega2560();
-  //Comm::connect("ENTER HERE", "ENTER HERE");
+  Atlas::initReedSwitch();
   
-  //pinMode(16, INPUT);
-  //digitalWrite(16, HIGH);
+  Comm::connect("SSID", "PSK");
 }
 
 void loop() {
   Atlas::operate();
-  //Serial.println(digitalRead(16));
 }
 

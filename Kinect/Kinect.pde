@@ -11,13 +11,13 @@ String remoteIP = null;
 int remotePort = -1;
 
 void find() {
-  udp.send("Echo", "192.168.0.255", 2390);
+  udp.send("Echo", "192.168.1.255", 2390);
 }
 
 void receive(byte[] message, String ip, int port) {
   if (ip.equals("127.0.0.1")) return;
   
-  print("Rcvd: " + ip + ":" + port + " ");
+  print("<< [Rcvd: " + ip + ":" + port + "] ");
   println(new String(message));
   
   remoteIP = ip;
